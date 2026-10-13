@@ -1,7 +1,37 @@
 import { useEffect, useRef, useState } from "react"
 import logo from "./imports/itl_leon.png"
 
-type Zone = "Acceso 1" | "Acceso 2" | "Acceso 3"
+const zones = ["Principal", "Libramiento", "Yupol", "Estacionamiento"] as const
+type Zone = typeof zones[number]
+const accounts: Record<string, Zone> = {
+  "23240426": "Principal",
+  "23240427": "Libramiento",
+  "23240428": "Yupol",
+  "23240429": "Estacionamiento",
+}
+const routes: Record<Zone, string[]> = {
+  Principal: [
+    "Biblioteca",
+    "A",
+    "Q",
+    "R",
+    "P",
+    "J",
+    "H",
+    "B",
+    "G",
+    "K",
+    "F",
+    "C",
+    "D",
+  ],
+  Libramiento: ["Canchas", "W", "E"],
+  Yupol: ["T", "S", "Ñ", "O", "M", "L"],
+  Estacionamiento: ["Entrada vehicular", "Cajones", "Salida vehicular"],
+}
+const checkpointCode = (point: string) =>
+  `QR-${point.toUpperCase().replace(/ /g, "-")}`
+
 type Vehicle = "Autos" | "Motos" | "Bicicletas"
 type Entry = { id: number time: string zone: Zone text: string }
 type Candidate = {
@@ -9,6 +39,7 @@ type Candidate = {
   control: string
   known: boolean
   schedule: boolean
+  pass: boolean
 }
 const people: Record<string, Candidate> = {
   "QR-21310234": {
@@ -16,18 +47,28 @@ const people: Record<string, Candidate> = {
     control: "21310234",
     known: true,
     schedule: true,
+    pass: true,
   },
   "QR-21310567": {
     name: "María González López",
     control: "21310567",
     known: true,
     schedule: false,
+    pass: true,
+  },
+  "QR-SIN-PASE": {
+    name: "Andrea López",
+    control: "21310890",
+    known: true,
+    schedule: true,
+    pass: false,
   },
   "QR-DESCONOCIDO": {
     name: "Identidad no reconocida",
     control: "Sin registro",
     known: false,
     schedule: false,
+    pass: true,
   },
 }
 const capacities = { Autos: 120, Motos: 40, Bicicletas: 60 }
@@ -114,14 +155,25 @@ function Panel({
   )
 }
 export default function App() {
-  const [zone, setZone] = useState<Zone>("Acceso 1")
+  const [zone, setZone] = useState<Zone>("Principal")
+  const [username, setUsername] = useState("")
+  const [password, setPassword] = useState("")
+  const [loginError, setLoginError] = useState("")
   const [logged, setLogged] = useState(false)
   const [tab, setTab] = useState("Monitoreo")
-  const [highFlow, setHighFlow] = useState(false)
+  const [flows, setFlows] = useState<Partial<Record<Zone, boolean>>>({})
+  const highFlow = !!flows[zone]
+  const setHighFlow = (value: boolean) =>
+    setFlows((f) => ({ ...f, [zone]: value }))
   const [spaces, setSpaces] = useState(initialSpaces)
   const [entries, setEntries] = useState<Entry[]>([])
   const [devices, setDevices] = useState<Record<string, boolean>>({})
-  const [emergency, setEmergency] = useState("")
+  const [emergencies, setEmergencies] = useState<Partial<Record<Zone, string>>>(
+    {},
+  )
+  const emergency = emergencies[zone] || ""
+  const setEmergency = (value: string) =>
+    setEmergencies((e) => ({ ...e, [zone]: value }))
   const [confirm, setConfirm] = useState<{
     action: string
     stage: number
@@ -135,10 +187,23 @@ export default function App() {
     text: string
     time: string
   }[]>([])
-  const [destination, setDestination] = useState<Zone>("Acceso 2")
+  const [destination, setDestination] = useState<Zone>("Libramiento")
   const [message, setMessage] = useState("")
-  const [patrol, setPatrol] = useState(false)
-  const [checks, setChecks] = useState<string[]>([])
+  const [patrols, setPatrols] = useState<Partial<Record<Zone, boolean>>>({})
+  const [zoneChecks, setZoneChecks] = useState<Partial<Record<Zone, string[]>>>(
+    {},
+  )
+  const patrol = !!patrols[zone]
+  const checks = zoneChecks[zone] || []
+  const setPatrol = (value: boolean) =>
+    setPatrols((p) => ({ ...p, [zone]: value }))
+  const setChecks = (value: string[] | ((c: string[]) => string[])) =>
+    setZoneChecks((c) => ({
+      ...c,
+      [zone]: typeof value === "function" ? value(c[zone] || []) : value,
+    }))
+  const route = routes[zone].map(checkpointCode)
+  const localEntries = entries.filter((e) => e.zone === zone)
   const [checkpoint, setCheckpoint] = useState("")
   const [feedback, setFeedback] = useState("")
   const [clock, setClock] = useState(new Date())
@@ -180,14 +245,17 @@ export default function App() {
     return !!devices[`${zone}-${name}`]
   }
   const hardwareNames =
-    zone === "Acceso 1"
-      ? [
-          "Torniquete entrada",
-          "Torniquete salida",
-          "Pluma entrada",
-          "Pluma salida",
-        ]
+    zone === "Estacionamiento"
+      ? ["Pluma entrada", "Pluma salida"]
       : ["Torniquete entrada", "Torniquete salida"]
+  function closeLocalDevices() {
+    setDevices((d) => ({
+      ...d,
+      ...Object.fromEntries(
+        hardwareNames.map((name) => [`${zone}-${name}`, false]),
+      ),
+    }))
+  }
   function applyConfirmation() {
     if (!confirm) return
     if (confirm.stage === 1) {
@@ -196,11 +264,12 @@ export default function App() {
     }
     if (confirm.action === "Restablecer operación") {
       setEmergency("")
-      setDevices({})
+      closeLocalDevices()
       log("Operación restablecida manualmente. Dispositivos cerrados.")
     } else {
       setEmergency(confirm.action)
-      setDevices({})
+      setHighFlow(false)
+      closeLocalDevices()
       log(
         `Protocolo activado: ${confirm.action}. ${
           confirm.action === "Evacuación"
@@ -238,16 +307,32 @@ export default function App() {
             <form
               onSubmit={(e) => {
                 e.preventDefault()
+                const assigned = accounts[username.trim()]
+                if (!assigned || password !== "itl2026") {
+                  setLoginError(
+                    "Cuenta o contraseña incorrecta. Utiliza una cuenta demo de la lista.",
+                  )
+                  return
+                }
+                setZone(assigned)
                 setLogged(true)
-                setDestination(zone === "Acceso 2" ? "Acceso 1" : "Acceso 2")
+                setPassword("")
+                setLoginError("")
+                setDestination(zones.find((z) => z !== assigned)!)
+                setNote("")
+                setMessage("")
+                setFeedback("")
+                setCheckpoint("")
               }}
             >
               <label>
-                Correo institucional
+                Número de control
                 <input
-                  type="email"
+                  type="text"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
                   required
-                  placeholder="guardia@itl.edu.mx"
+                  placeholder="23240426"
                   autoComplete="username"
                 />
               </label>
@@ -255,33 +340,43 @@ export default function App() {
                 Contraseña
                 <input
                   type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
                   required
                   placeholder="Ingresa tu contraseña"
                   autoComplete="current-password"
                 />
               </label>
-              <label>
-                Zona de operación
-                <select
-                  value={zone}
-                  onChange={(e) => setZone(e.target.value as Zone)}
-                >
-                  <option>Acceso 1</option>
-                  <option>Acceso 2</option>
-                  <option>Acceso 3</option>
-                </select>
-              </label>
               <div className="info-box">
-                {zone === "Acceso 1"
-                  ? "Operación peatonal y vehicular mediante QR"
-                  : "Operación exclusivamente peatonal mediante QR"}
+                <strong>Cuentas de demostración</strong>
+                {Object.entries(accounts).map(([id, assigned]) => (
+                  <button
+                    type="button"
+                    className="demo-account"
+                    key={id}
+                    onClick={() => {
+                      setUsername(id)
+                      setPassword("itl2026")
+                      setLoginError("")
+                    }}
+                  >
+                    <span>{id}</span>
+                    <span>{assigned}</span>
+                  </button>
+                ))}
+                Contraseña para todas las cuentas: <strong>itl2026</strong>
               </div>
+              {loginError && (
+                <p className="validation warning" role="alert">
+                  {loginError}
+                </p>
+              )}
               <button className="primary full">
                 Iniciar turno <span>→</span>
               </button>
             </form>
             <p className="login-help">
-              Modo demostración: usa cualquier correo válido y contraseña.
+              Cada cuenta opera únicamente su caseta asignada.
               <br />
               No se conecta a sistemas institucionales.
             </p>
@@ -314,14 +409,21 @@ export default function App() {
         <div className="profile">
           <span className="avatar small">AM</span>
           <div>
-            <strong>Alan Medina</strong>
-            <span>Guardia · Turno matutino</span>
+            <strong>Guardia demo</strong>
+            <span>
+              {username} · {zone}
+            </span>
           </div>
         </div>
         <button
           className="logout"
           onClick={() => {
             setLogged(false)
+            setDictating(false)
+            setConfirm(null)
+            setNote("")
+            setMessage("")
+            setPassword("")
             setTab("Monitoreo")
           }}
         >
@@ -333,7 +435,7 @@ export default function App() {
           <i /> Simulación en línea
         </span>
         <span>
-          {zone} · {zone === "Acceso 1" ? "Peatonal y vehicular" : "Peatonal"}
+          {zone} · {zone === "Estacionamiento" ? "Vehicular" : "Peatonal"}
         </span>
         <span>Validación de identidad y horario activa</span>
         <span className="demo-tag">ENTORNO DEMO</span>
@@ -343,7 +445,7 @@ export default function App() {
           <div>
             <div className="eyebrow">CENTRO DE OPERACIÓN</div>
             <h1>Monitoreo de accesos</h1>
-            <p>Supervisión y control en tiempo real · {zone}</p>
+            <p>Supervisión y control simulados · {zone}</p>
           </div>
           <div className="flow-control">
             <div>
@@ -389,18 +491,16 @@ export default function App() {
           </div>
         )}
         <nav className="tabs">
-          {["Monitoreo", "Rondines", "Bitácora", "Chat intercasetas"].map(
-            (t) => (
-              <button
-                key={t}
-                className={tab === t ? "active" : ""}
-                onClick={() => setTab(t)}
-              >
-                {t}
-                {t === "Bitácora" && <span>{entries.length}</span>}
-              </button>
-            ),
-          )}
+          {["Monitoreo", "Rondines"].map((t) => (
+            <button
+              key={t}
+              className={tab === t ? "active" : ""}
+              onClick={() => setTab(t)}
+            >
+              {t}
+              {t === "Bitácora" && <span>{localEntries.length}</span>}
+            </button>
+          ))}
         </nav>
         <div className="feedback" role="status">
           {feedback ||
@@ -408,21 +508,51 @@ export default function App() {
         </div>
         {tab === "Monitoreo" && (
           <>
-            <div
-              className={`dashboard-grid ${
-                zone !== "Acceso 1" ? "pedestrian-only" : ""
-              }`}
+            <Panel
+              title={`Cámaras · ${zone}`}
+              subtitle="Escenas de demostración · Sin conexión a cámaras reales"
             >
-              <AccessPanel
-                key={`${zone}-pedestrian`}
-                title="Acceso peatonal"
-                vehicle={false}
-                emergency={emergency}
-                highFlow={highFlow}
-                spaces={spaces}
-                onAuthorize={(text) => log(text)}
-              />
-              {zone === "Acceso 1" && (
+              <div className="camera-grid">
+                {["Entrada", "Salida"].map((view, index) => (
+                  <div className="camera-scene" key={`${zone}-${view}`}>
+                    <div className="camera-label">
+                      <span>
+                        CAM 0{index + 1} · {zone} / {view}
+                      </span>
+                      <span>SIMULADA</span>
+                    </div>
+                    <div
+                      className={`campus-scene ${
+                        zone === "Estacionamiento" ? "parking-scene" : ""
+                      }`}
+                    >
+                      <div className="campus-building">
+                        <span>ITL · {zone}</span>
+                      </div>
+                      <div className="campus-path" />
+                      <div className="campus-gate" />
+                    </div>
+                    <div className="camera-caption">
+                      Vista de {view.toLowerCase()} · Escena estática, sin video
+                      real
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Panel>
+            <div className={`dashboard-grid ${"pedestrian-only"}`}>
+              {zone !== "Estacionamiento" && (
+                <AccessPanel
+                  key={`${zone}-pedestrian`}
+                  title="Acceso peatonal"
+                  vehicle={false}
+                  emergency={emergency}
+                  highFlow={highFlow}
+                  spaces={spaces}
+                  onAuthorize={(text) => log(text)}
+                />
+              )}
+              {zone === "Estacionamiento" && (
                 <AccessPanel
                   key={`${zone}-vehicle`}
                   title="Acceso vehicular"
@@ -523,7 +653,7 @@ export default function App() {
                 </Panel>
               </div>
             </div>
-            {zone === "Acceso 1" && (
+            {zone === "Estacionamiento" && (
               <Panel
                 title="Disponibilidad de estacionamiento"
                 subtitle="Lugares disponibles · Conteos independientes"
@@ -572,7 +702,7 @@ export default function App() {
               </Panel>
             )}
             <Panel title="Actividad reciente" subtitle="Trazabilidad del turno">
-              <Activity entries={entries.slice(0, 5)} />
+              <Activity entries={localEntries.slice(0, 5)} />
             </Panel>
           </>
         )}
@@ -584,7 +714,9 @@ export default function App() {
                   <Icon />
                   <h3>{patrol ? "Rondín en curso" : "Listo para iniciar"}</h3>
                   <p>Verifica los puntos de control con tu tablet.</p>
-                  <span>{checks.length} / 3 puntos registrados</span>
+                  <span>
+                    {checks.length} / {route.length} puntos registrados
+                  </span>
                 </div>
                 {!patrol ? (
                   <button
@@ -609,31 +741,31 @@ export default function App() {
                       />
                     </label>
                     <div className="sample-buttons">
-                      {["BIBLIOTECA", "EDIFICIO-A", "ESTACIONAMIENTO"].map(
-                        (c) => (
-                          <button
-                            key={c}
-                            onClick={() => setCheckpoint(`QR-${c}`)}
-                          >
-                            {c}
-                          </button>
-                        ),
-                      )}
+                      {routes[zone].map((c) => (
+                        <button
+                          key={c}
+                          onClick={() => setCheckpoint(checkpointCode(c))}
+                        >
+                          {c}
+                        </button>
+                      ))}
                     </div>
                     <button
                       className="primary full"
                       onClick={() => {
-                        const valid = [
-                          "QR-BIBLIOTECA",
-                          "QR-EDIFICIO-A",
-                          "QR-ESTACIONAMIENTO",
-                        ]
+                        const valid = route
                         if (!valid.includes(checkpoint)) {
                           setFeedback("QR de rondín no reconocido.")
                           return
                         }
                         if (checks.includes(checkpoint)) {
                           setFeedback("Este punto ya fue registrado.")
+                          return
+                        }
+                        if (checkpoint !== route[checks.length]) {
+                          setFeedback(
+                            "Escanea el siguiente punto de la ruta asignada.",
+                          )
                           return
                         }
                         setChecks((c) => [...c, checkpoint])
@@ -645,10 +777,12 @@ export default function App() {
                     </button>
                     <button
                       className="outline full"
-                      disabled={checks.length !== 3}
+                      disabled={checks.length !== route.length}
                       onClick={() => {
                         setPatrol(false)
-                        log("Rondín finalizado: 3 de 3 puntos verificados.")
+                        log(
+                          `Rondín finalizado: ${route.length} de ${route.length} puntos verificados.`,
+                        )
                       }}
                     >
                       Finalizar rondín
@@ -659,178 +793,184 @@ export default function App() {
             </Panel>
             <Panel
               title="Ruta de verificación"
-              subtitle="Tres puntos de control"
+              subtitle={`${route.length} puntos · ${zone}`}
             >
               <div className="panel-body">
-                {["QR-BIBLIOTECA", "QR-EDIFICIO-A", "QR-ESTACIONAMIENTO"].map(
-                  (c, i) => (
-                    <div className="route-row" key={c}>
-                      <span
-                        className={`route-number ${
-                          checks.includes(c) ? "checked" : ""
-                        }`}
-                      >
-                        {checks.includes(c) ? "✓" : i + 1}
-                      </span>
-                      <div>
-                        <strong>
-                          {c.replace("QR-", "").replace("-", " ")}
-                        </strong>
-                        <p>
-                          {checks.includes(c)
-                            ? "Verificado y registrado en bitácora"
-                            : "Pendiente de verificación"}
-                        </p>
-                      </div>
+                {route.map((c, i) => (
+                  <div className="route-row" key={c}>
+                    <span
+                      className={`route-number ${
+                        checks.includes(c) ? "checked" : ""
+                      }`}
+                    >
+                      {checks.includes(c) ? "✓" : i + 1}
+                    </span>
+                    <div>
+                      <strong>{c.replace("QR-", "").replace("-", " ")}</strong>
+                      <p>
+                        {checks.includes(c)
+                          ? "Verificado y registrado en bitácora"
+                          : "Pendiente de verificación"}
+                      </p>
                     </div>
-                  ),
-                )}
+                  </div>
+                ))}
               </div>
             </Panel>
           </div>
         )}
-        {tab === "Bitácora" && (
-          <>
+        <div className="bottom-console">
+          <div>
+            <>
+              <Panel
+                title="Reporte de turno"
+                subtitle="Registro manual y dictado simulado"
+                icon="mic"
+              >
+                <div className="panel-body">
+                  <label>
+                    Novedades del turno
+                    <textarea
+                      value={note}
+                      onChange={(e) => setNote(e.target.value)}
+                      placeholder="Describe una novedad, incidente o cambio de turno…"
+                      rows={4}
+                    />
+                  </label>
+                  <div className="button-row">
+                    <button
+                      className="outline"
+                      aria-pressed={dictating}
+                      onClick={() => setDictating(!dictating)}
+                    >
+                      <Icon kind="mic" />
+                      {dictating ? "Detener dictado" : "Simular dictado"}
+                    </button>
+                    <button
+                      className="primary"
+                      disabled={!note.trim() || dictating}
+                      onClick={() => {
+                        log(`Reporte de turno: ${note.trim()}`)
+                        setNote("")
+                      }}
+                    >
+                      Guardar reporte
+                    </button>
+                  </div>
+                  {dictating && (
+                    <p role="status" className="green-text">
+                      Generando transcripción de demostración…
+                    </p>
+                  )}
+                  <p className="panel-footnote">
+                    El dictado genera texto de ejemplo editable; no usa el
+                    micrófono real.
+                  </p>
+                </div>
+              </Panel>
+              <Panel
+                title="Bitácora del turno"
+                subtitle={`${localEntries.length} eventos registrados · Se conserva al cambiar de pantalla`}
+              >
+                <Activity entries={localEntries} />
+              </Panel>
+            </>
+          </div>
+          <div>
             <Panel
-              title="Reporte de turno"
-              subtitle="Registro manual y dictado simulado"
-              icon="mic"
+              title="Coordinación intercasetas"
+              subtitle="Mensajería local simulada · No envía mensajes reales"
             >
               <div className="panel-body">
                 <label>
-                  Novedades del turno
-                  <textarea
-                    value={note}
-                    onChange={(e) => setNote(e.target.value)}
-                    placeholder="Describe una novedad, incidente o cambio de turno…"
-                    rows={4}
-                  />
+                  Caseta destinataria
+                  <select
+                    value={destination}
+                    onChange={(e) => setDestination(e.target.value as Zone)}
+                  >
+                    {zones
+                      .filter((z) => z !== zone)
+                      .map((z) => (
+                        <option key={z}>{z}</option>
+                      ))}
+                  </select>
                 </label>
-                <div className="button-row">
-                  <button
-                    className="outline"
-                    aria-pressed={dictating}
-                    onClick={() => setDictating(!dictating)}
-                  >
-                    <Icon kind="mic" />
-                    {dictating ? "Detener dictado" : "Simular dictado"}
-                  </button>
-                  <button
-                    className="primary"
-                    disabled={!note.trim() || dictating}
-                    onClick={() => {
-                      log(`Reporte de turno: ${note.trim()}`)
-                      setNote("")
-                    }}
-                  >
-                    Guardar reporte
-                  </button>
-                </div>
-                {dictating && (
-                  <p role="status" className="green-text">
-                    Generando transcripción de demostración…
-                  </p>
-                )}
-                <p className="panel-footnote">
-                  El dictado genera texto de ejemplo editable; no usa el
-                  micrófono real.
-                </p>
-              </div>
-            </Panel>
-            <Panel
-              title="Bitácora del turno"
-              subtitle={`${entries.length} eventos registrados · Se conserva al cambiar de pantalla`}
-            >
-              <Activity entries={entries} />
-            </Panel>
-          </>
-        )}
-        {tab === "Chat intercasetas" && (
-          <Panel
-            title="Coordinación intercasetas"
-            subtitle="Mensajería local simulada · No envía mensajes reales"
-          >
-            <div className="panel-body">
-              <label>
-                Caseta destinataria
-                <select
-                  value={destination}
-                  onChange={(e) => setDestination(e.target.value as Zone)}
-                >
-                  {(["Acceso 1", "Acceso 2", "Acceso 3"] as Zone[])
-                    .filter((z) => z !== zone)
-                    .map((z) => (
-                      <option key={z}>{z}</option>
-                    ))}
-                </select>
-              </label>
-              <div className="chat-messages" aria-live="polite">
-                {chat.filter(
-                  (c) => c.to === destination || c.from === destination,
-                ).length === 0 && (
-                  <div className="empty">
-                    <Icon kind="person" />
-                    <p>Inicia la coordinación con {destination}.</p>
-                  </div>
-                )}
-                {chat
-                  .filter((c) => c.to === destination || c.from === destination)
-                  .map((c, i) => (
-                    <div
-                      className={`chat-bubble ${c.from === zone ? "sent" : ""}`}
-                      key={i}
-                    >
-                      <strong>
-                        {c.from} · {c.time}
-                      </strong>
-                      <p>{c.text}</p>
+                <div className="chat-messages" aria-live="polite">
+                  {chat.filter(
+                    (c) =>
+                      (c.from === zone && c.to === destination) ||
+                      (c.from === destination && c.to === zone),
+                  ).length === 0 && (
+                    <div className="empty">
+                      <Icon kind="person" />
+                      <p>Inicia la coordinación con {destination}.</p>
                     </div>
-                  ))}
-              </div>
-              <form
-                className="chat-compose"
-                onSubmit={(e) => {
-                  e.preventDefault()
-                  if (!message.trim()) return
-                  const text = message.trim()
-                  setChat((c) => [
-                    ...c,
-                    { from: zone, to: destination, text, time: time() },
-                  ])
-                  setMessage("")
-                  log(`Mensaje enviado a ${destination}: ${text}`)
-                }}
-              >
-                <input
-                  aria-label="Mensaje"
-                  value={message}
-                  onChange={(e) => setMessage(e.target.value)}
-                  placeholder="Escribe un mensaje a la caseta…"
-                />
-                <button className="primary" disabled={!message.trim()}>
-                  Enviar
+                  )}
+                  {chat
+                    .filter(
+                      (c) =>
+                        (c.from === zone && c.to === destination) ||
+                        (c.from === destination && c.to === zone),
+                    )
+                    .map((c, i) => (
+                      <div
+                        className={`chat-bubble ${
+                          c.from === zone ? "sent" : ""
+                        }`}
+                        key={i}
+                      >
+                        <strong>
+                          {c.from} · {c.time}
+                        </strong>
+                        <p>{c.text}</p>
+                      </div>
+                    ))}
+                </div>
+                <form
+                  className="chat-compose"
+                  onSubmit={(e) => {
+                    e.preventDefault()
+                    if (!message.trim()) return
+                    const text = message.trim()
+                    setChat((c) => [
+                      ...c,
+                      { from: zone, to: destination, text, time: time() },
+                    ])
+                    setMessage("")
+                    log(`Mensaje enviado a ${destination}: ${text}`)
+                  }}
+                >
+                  <input
+                    aria-label="Mensaje"
+                    value={message}
+                    onChange={(e) => setMessage(e.target.value)}
+                    placeholder="Escribe un mensaje a la caseta…"
+                  />
+                  <button className="primary" disabled={!message.trim()}>
+                    Enviar
+                  </button>
+                </form>
+                <button
+                  className="outline"
+                  onClick={() => {
+                    setChat((c) => [
+                      ...c,
+                      {
+                        from: destination,
+                        to: zone,
+                        text: "Recibido. Caseta en operación y pendiente de indicaciones.",
+                        time: time(),
+                      },
+                    ])
+                    log(`Respuesta simulada recibida de ${destination}.`)
+                  }}
+                >
+                  Simular respuesta de caseta
                 </button>
-              </form>
-              <button
-                className="outline"
-                onClick={() => {
-                  setChat((c) => [
-                    ...c,
-                    {
-                      from: destination,
-                      to: zone,
-                      text: "Recibido. Caseta en operación y pendiente de indicaciones.",
-                      time: time(),
-                    },
-                  ])
-                  log(`Respuesta simulada recibida de ${destination}.`)
-                }}
-              >
-                Simular respuesta de caseta
-              </button>
-            </div>
-          </Panel>
-        )}
+              </div>
+            </Panel>
+          </div>
+        </div>
       </main>
       <footer className="app-footer">
         Instituto Tecnológico de León{" "}
@@ -850,6 +990,9 @@ export default function App() {
             </div>
             <div className="eyebrow">CONFIRMACIÓN {confirm.stage} DE 2</div>
             <h2>{confirm.action}</h2>
+            <p>
+              Únicamente caseta {zone}. Las otras casetas no se modificarán.
+            </p>
             <p>
               {confirm.stage === 1
                 ? "Confirma que deseas iniciar este protocolo. Aún no se aplicarán cambios."
@@ -892,7 +1035,7 @@ function Activity({ entries }: { entries: Entry[] }) {
           <span className="event-dot" />
           <div>
             <p>{e.text}</p>
-            <span>{e.zone} · Alan Medina</span>
+            <span>{e.zone} · Guardia demo</span>
           </div>
         </div>
       ))}
@@ -920,6 +1063,7 @@ function AccessPanel({
   const [reason, setReason] = useState("")
   const [type, setType] = useState<Vehicle>("Autos")
   const [direction, setDirection] = useState("Entrada")
+  const [plate, setPlate] = useState("GTO-426-A")
   const [processed, setProcessed] = useState(false)
   function reset() {
     setCandidate(null)
@@ -938,9 +1082,11 @@ function AccessPanel({
     setReason("")
     const status = !person.known
       ? "Identidad desconocida. Acceso rechazado."
-      : !person.schedule
-        ? "Fuera del horario autorizado. Requiere motivo de excepción."
-        : "Identidad y horario verificados. Listo para autorizar."
+      : !person.pass
+        ? "Pase no vigente. Acceso rechazado."
+        : !person.schedule
+          ? "Fuera del horario autorizado. Requiere motivo de excepción."
+          : "Identidad y horario verificados. Listo para autorizar."
     setResult(status)
     onAuthorize(
       `Validación QR ${
@@ -951,6 +1097,9 @@ function AccessPanel({
   const blocked =
     !!emergency ||
     !candidate?.known ||
+    !candidate?.pass ||
+    (vehicle && type !== "Bicicletas" && !plate.trim()) ||
+    (vehicle && direction === "Salida" && spaces[type] === capacities[type]) ||
     processed ||
     (vehicle && direction === "Entrada" && spaces[type] === 0) ||
     (!candidate?.schedule && !reason.trim())
@@ -962,6 +1111,14 @@ function AccessPanel({
       `${direction} ${
         vehicle ? `vehicular (${type})` : "peatonal"
       } autorizada: ${candidate.name}.${
+        vehicle
+          ? ` QR: ${qr}. ${
+              type === "Bicicletas"
+                ? "Sin matrícula"
+                : `Matrícula simulada: ${plate.trim().toUpperCase()}`
+            }.`
+          : ""
+      }${
         !candidate.schedule
           ? ` Excepción fuera de horario. Motivo: ${reason.trim()}.`
           : " Identidad y horario válidos."
@@ -975,7 +1132,7 @@ function AccessPanel({
       title={title}
       subtitle={
         vehicle
-          ? "Validación QR · Sin lectura de placas"
+          ? "QR + matrícula simulada · Bicicletas solo QR"
           : "Torniquetes · Identidad y horario"
       }
       icon={vehicle ? "car" : "person"}
@@ -1025,6 +1182,20 @@ function AccessPanel({
             </select>
           </label>
         )}
+        {vehicle && type !== "Bicicletas" && (
+          <label>
+            Matrícula simulada
+            <input
+              value={plate}
+              onChange={(e) => {
+                setPlate(e.target.value)
+                reset()
+              }}
+              placeholder="GTO-426-A"
+              disabled={!!emergency}
+            />
+          </label>
+        )}
         <label>
           Código QR
           <input
@@ -1055,6 +1226,15 @@ function AccessPanel({
             }}
           >
             Fuera de horario
+          </button>
+          <button
+            disabled={!!emergency}
+            onClick={() => {
+              setQr("QR-SIN-PASE")
+              reset()
+            }}
+          >
+            Sin pase
           </button>
           <button
             disabled={!!emergency}
@@ -1107,22 +1287,32 @@ function AccessPanel({
             {result}
           </div>
         )}
-        {candidate?.known && !candidate.schedule && !processed && (
-          <label>
-            Motivo obligatorio de excepción
-            <textarea
-              rows={2}
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              placeholder="Describe por qué se autoriza fuera de horario"
-            />
-          </label>
-        )}
+        {candidate?.known &&
+          candidate.pass &&
+          !candidate.schedule &&
+          !processed && (
+            <label>
+              Motivo obligatorio de excepción
+              <textarea
+                rows={2}
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                placeholder="Describe por qué se autoriza fuera de horario"
+              />
+            </label>
+          )}
         {vehicle && direction === "Entrada" && spaces[type] === 0 && (
           <div className="validation warning">
             Sin lugares para {type.toLowerCase()}. Desviar al Edificio ZZ.
           </div>
         )}
+        {vehicle &&
+          direction === "Salida" &&
+          spaces[type] === capacities[type] && (
+            <p className="validation warning">
+              No hay vehículos registrados de este tipo para salir.
+            </p>
+          )}
         <button className="primary full" disabled={blocked} onClick={authorize}>
           {processed
             ? "Movimiento registrado"
